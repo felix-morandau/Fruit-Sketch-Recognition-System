@@ -8,6 +8,7 @@
 #include <iostream>
 #include <filesystem>
 #include <random>
+#include <opencv2/core/utils/logger.hpp>
 
 using namespace cv;
 using namespace std;
@@ -253,8 +254,6 @@ public:
     }
 };
 
-// ============= LOAD IMAGES FROM DIRECTORY =============
-
 map<string, int> fruitLabelMap = {
     {"apple", 0},
     {"banana", 1},
@@ -316,19 +315,16 @@ vector<FruitFeatures> loadImagesFromDirectory(const string& baseDir, int maxImag
     return features;
 }
 
-// Split data into train and test sets
 void splitTrainTest(const vector<FruitFeatures>& allData,
     vector<FruitFeatures>& trainSet,
     vector<FruitFeatures>& testSet,
     double trainRatio = 0.8) {
 
-    // Group by label
     map<int, vector<FruitFeatures>> dataByLabel;
     for (const auto& feat : allData) {
         dataByLabel[feat.label].push_back(feat);
     }
 
-    // Shuffle and split each class
     random_device rd;
     mt19937 g(rd());
 
@@ -346,12 +342,142 @@ void splitTrainTest(const vector<FruitFeatures>& allData,
         }
     }
 
-    // Shuffle train and test sets
     shuffle(trainSet.begin(), trainSet.end(), g);
     shuffle(testSet.begin(), testSet.end(), g);
 }
 
+// ============= INTERACTIVE DRAWING INTERFACE =============
+
+class DrawingApp {
+private:
+    Mat canvas;
+    Point prevPoint;
+    bool isDrawing;
+    KNNClassifier* classifier;
+
+public:
+    DrawingApp(int width, int height, KNNClassifier* knn) : classifier(knn) {
+        canvas = Mat::zeros(height, width, CV_8UC3);
+        canvas.setTo(Scalar(255, 255, 255)); // White background
+        isDrawing = false;
+        prevPoint = Point(-1, -1);
+    }
+
+    static void onMouse(int event, int x, int y, int flags, void* userdata) {
+        DrawingApp* app = (DrawingApp*)userdata;
+
+        if (event == EVENT_LBUTTONDOWN) {
+            app->isDrawing = true;
+            app->prevPoint = Point(x, y);
+        }
+        else if (event == EVENT_MOUSEMOVE && app->isDrawing) {
+            Point currentPoint(x, y);
+            line(app->canvas, app->prevPoint, currentPoint, Scalar(0, 0, 0), 3);
+            app->prevPoint = currentPoint;
+            imshow("Draw Your Fruit", app->canvas);
+        }
+        else if (event == EVENT_LBUTTONUP) {
+            app->isDrawing = false;
+        }
+    }
+
+    void run() {
+        string windowName = "Draw Your Fruit";
+        namedWindow(windowName, WINDOW_AUTOSIZE);
+        setMouseCallback(windowName, onMouse, this);
+
+        cout << "\n===== INTERACTIVE DRAWING MODE =====" << endl;
+        cout << "Instructions:" << endl;
+        cout << "  - Draw a fruit sketch with your mouse" << endl;
+        cout << "  - Press SPACE to predict what you drew" << endl;
+        cout << "  - Press 'C' to clear and draw again" << endl;
+        cout << "  - Press 'S' to save your drawing" << endl;
+        cout << "  - Press ESC to exit" << endl;
+        cout << "====================================\n" << endl;
+
+        imshow(windowName, canvas);
+
+        while (true) {
+            int key = waitKey(1);
+
+            if (key == 27) { // ESC
+                break;
+            }
+            else if (key == 32) { // SPACE - Predict
+                predict();
+            }
+            else if (key == 'c' || key == 'C') { // Clear
+                clear();
+            }
+            else if (key == 's' || key == 'S') { // Save
+                saveDrawing();
+            }
+        }
+
+        destroyWindow(windowName);
+    }
+
+private:
+    void predict() {
+        // Convert to grayscale
+        Mat gray;
+        cvtColor(canvas, gray, COLOR_BGR2GRAY);
+
+        // Invert (white background to black, black drawing to white)
+        Mat inverted;
+        bitwise_not(gray, inverted);
+
+        // Resize to standard size (similar to Quick Draw images)
+        Mat resized;
+        resize(inverted, resized, Size(28, 28), 0, 0, INTER_AREA);
+
+        // Extract features
+        FruitFeatures features = extractFeatures(resized);
+
+        // Predict
+        int predictedLabel = classifier->predict(features);
+
+        if (predictedLabel >= 0 && predictedLabel < labelToFruitMap.size()) {
+            string fruitName = labelToFruitMap[predictedLabel];
+
+            cout << "\n*** PREDICTION: " << fruitName << " ***" << endl;
+
+            // Show prediction on canvas
+            Mat displayCanvas = canvas.clone();
+            putText(displayCanvas, "Prediction: " + fruitName,
+                Point(10, 30), FONT_HERSHEY_SIMPLEX, 1.0,
+                Scalar(0, 255, 0), 2);
+            imshow("Draw Your Fruit", displayCanvas);
+
+            // Show preprocessed version in separate window
+            Mat edges = preprocessImage(resized);
+            Mat edgesDisplay;
+            resize(edges, edgesDisplay, Size(280, 280), 0, 0, INTER_NEAREST);
+            imshow("Preprocessed (What AI Sees)", edgesDisplay);
+        }
+        else {
+            cout << "Could not predict. Try drawing clearer!" << endl;
+        }
+    }
+
+    void clear() {
+        canvas.setTo(Scalar(255, 255, 255));
+        imshow("Draw Your Fruit", canvas);
+        destroyWindow("Preprocessed (What AI Sees)");
+        cout << "Canvas cleared. Draw again!" << endl;
+    }
+
+    void saveDrawing() {
+        static int saveCount = 0;
+        string filename = "my_drawing_" + to_string(saveCount++) + ".png";
+        imwrite(filename, canvas);
+        cout << "Drawing saved as: " << filename << endl;
+    }
+};
+
 int main() {
+    cv::utils::logging::setLogLevel(cv::utils::logging::LOG_LEVEL_WARNING);
+
     cout << "===== Fruit Sketch Recognition System =====" << endl;
 
     // Load all images (limit to 1000 per class for faster testing)
@@ -401,19 +527,12 @@ int main() {
         }
     }
 
-    // Test on a single image (example)
-    cout << "\n===== Test Single Image =====" << endl;
-    string testImagePath = "fruit_images/apple/apple_00000.png";
+    // Launch interactive drawing interface
+    cout << "\n===== Starting Interactive Mode =====" << endl;
+    DrawingApp app(800, 600, &knn);
+    app.run();
 
-    if (fs::exists(testImagePath)) {
-        Mat testImg = imread(testImagePath, IMREAD_GRAYSCALE);
-        if (!testImg.empty()) {
-            FruitFeatures testFeat = extractFeatures(testImg);
-            int predicted = knn.predict(testFeat);
-            cout << "Test image: " << testImagePath << endl;
-            cout << "Predicted: " << labelToFruitMap[predicted] << endl;
-        }
-    }
+    cout << "\nThank you for using Fruit Sketch Recognition!" << endl;
 
     return 0;
 }
